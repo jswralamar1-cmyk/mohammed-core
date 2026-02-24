@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: mohammed-core-worker
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: BINANCE_API_KEY
+        from: "env"
+      - key: BINANCE_API_SECRET
+        from: "env"
