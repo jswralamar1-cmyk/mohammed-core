@@ -68,8 +68,15 @@ class ExecutionGuard:
             if sl_pct <= 0:
                 sl_pct = 0.012
 
+            # Max notional = balance * leverage (hard cap)
+            max_notional = balance * leverage
+
+            # Risk-based notional
             risk_amount = balance * risk_pct
             notional = (risk_amount / sl_pct) * leverage
+
+            # Cap notional at max_notional to prevent insufficient margin
+            notional = min(notional, max_notional * 0.95)  # 95% to leave buffer
             quantity = notional / entry_price
 
             # Get lot size precision
