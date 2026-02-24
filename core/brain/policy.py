@@ -31,4 +31,4 @@ DEFAULT_POLICY = {
     }
 }
 # --- Global Safety Switch ---
-LIVE_TRADING = False
+LIVE_TRADING = True
