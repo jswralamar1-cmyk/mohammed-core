@@ -37,11 +37,22 @@ class ExecutionGuard:
         try:
             account = self.client._get("/fapi/v2/account", signed=True)
             if not account:
+                print("[ExecutionGuard] Account fetch returned None", flush=True)
                 return 100.0
+            # Try assets list first
             for asset in account.get('assets', []):
                 if asset.get('asset') == 'USDT':
-                    return float(asset.get('availableBalance', 100.0))
-            return float(account.get('totalWalletBalance', 100.0))
+                    avail = float(asset.get('availableBalance', 0))
+                    wallet = float(asset.get('walletBalance', 0))
+                    bal = avail if avail > 0 else wallet
+                    print(f"[ExecutionGuard] USDT avail={avail} wallet={wallet} using={bal}", flush=True)
+                    return bal if bal > 0 else 100.0
+            # Fallback to top-level
+            total = float(account.get('totalWalletBalance', 0))
+            avail = float(account.get('availableBalance', 0))
+            bal = avail if avail > 0 else total
+            print(f"[ExecutionGuard] Fallback balance: total={total} avail={avail} using={bal}", flush=True)
+            return bal if bal > 0 else 100.0
         except Exception as e:
             print(f"[ExecutionGuard] Balance fetch error: {e}", flush=True)
             return 100.0
@@ -99,13 +110,13 @@ class ExecutionGuard:
         }, signed=True)
         print(f"[ExecutionGuard] Leverage set: {lev_result}", flush=True)
 
-        # 2. Set margin type (ignore if already set — error code -4046)
+        # 2. Set margin type to CROSS (compatible with Multi-Assets Mode)
+        # Skip if already set (-4046) or Multi-Assets mode active (-4168)
         margin_result = self.client._post("/fapi/v1/marginType", {
             "symbol": signal.symbol,
-            "marginType": "ISOLATED"
+            "marginType": "CROSSED"
         }, signed=True)
-        # Error -4046 means already ISOLATED — that's fine
-        if margin_result and margin_result.get('code') not in [None, -4046]:
+        if margin_result and margin_result.get('code') not in [None, -4046, -4168]:
             print(f"[ExecutionGuard] MarginType: {margin_result}", flush=True)
 
         # 3. Get current price
