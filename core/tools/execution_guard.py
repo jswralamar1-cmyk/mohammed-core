@@ -33,35 +33,58 @@ class ExecutionGuard:
         self.logger = TradeLogger()
 
     def _get_balance(self) -> float:
-        """Fetch available USDT balance from Binance Futures account."""
+        """
+        Fetch wallet balance and compute per-trade allocation.
+        Divides wallet balance by max_open_positions so multiple
+        positions can coexist without running out of margin.
+        """
         try:
             account = self.client._get("/fapi/v2/account", signed=True)
             if not account:
                 print("[ExecutionGuard] Account fetch returned None", flush=True)
-                return 100.0
+                return 20.0
+
+            wallet_balance = 0.0
+            avail_balance = 0.0
+
             # Try assets list first
             for asset in account.get('assets', []):
                 if asset.get('asset') == 'USDT':
-                    avail = float(asset.get('availableBalance', 0))
-                    wallet = float(asset.get('walletBalance', 0))
-                    bal = avail if avail > 0 else wallet
-                    print(f"[ExecutionGuard] USDT avail={avail} wallet={wallet} using={bal}", flush=True)
-                    return bal if bal > 0 else 100.0
-            # Fallback to top-level
-            total = float(account.get('totalWalletBalance', 0))
-            avail = float(account.get('availableBalance', 0))
-            bal = avail if avail > 0 else total
-            print(f"[ExecutionGuard] Fallback balance: total={total} avail={avail} using={bal}", flush=True)
-            return bal if bal > 0 else 100.0
+                    avail_balance = float(asset.get('availableBalance', 0))
+                    wallet_balance = float(asset.get('walletBalance', 0))
+                    break
+
+            # Fallback to top-level fields
+            if wallet_balance == 0:
+                wallet_balance = float(account.get('totalWalletBalance', 0))
+                avail_balance = float(account.get('availableBalance', 0))
+
+            print(f"[ExecutionGuard] USDT avail={avail_balance} wallet={wallet_balance}", flush=True)
+
+            # Allocate per-trade: wallet / max_positions so multiple trades can coexist
+            max_positions = self.policy.get('max_open_positions', 3)
+            per_trade_balance = wallet_balance / max_positions
+
+            # Never allocate more than what's actually available
+            if avail_balance > 0:
+                per_trade_balance = min(per_trade_balance, avail_balance)
+
+            # Minimum safety floor
+            if per_trade_balance < 5.0:
+                per_trade_balance = 5.0
+
+            print(f"[ExecutionGuard] Per-trade allocation: ${per_trade_balance:.2f} (wallet=${wallet_balance:.2f} / {max_positions} slots)", flush=True)
+            return per_trade_balance
+
         except Exception as e:
             print(f"[ExecutionGuard] Balance fetch error: {e}", flush=True)
-            return 100.0
+            return 20.0
 
     def _get_quantity(self, symbol: str, entry_price: float, sl_pct: float, risk_override: float = None) -> float:
         """Calculate order quantity based on risk parameters."""
         try:
             balance = self._get_balance()
-            print(f"[ExecutionGuard] Balance: ${balance:.2f}", flush=True)
+            print(f"[ExecutionGuard] Balance per trade: ${balance:.2f}", flush=True)
 
             risk_pct = risk_override if risk_override else self.policy.get('risk_per_trade', 0.02)
             leverage = self.policy.get('leverage', 10)
@@ -76,7 +99,7 @@ class ExecutionGuard:
             notional = (risk_amount / sl_pct) * leverage
 
             # Cap notional at max_notional to prevent insufficient margin
-            notional = min(notional, max_notional * 0.95)  # 95% to leave buffer
+            notional = min(notional, max_notional * 0.90)  # 90% to leave buffer
             quantity = notional / entry_price
 
             # Get lot size precision
@@ -166,6 +189,18 @@ class ExecutionGuard:
             "tp_price": signal.tp_price,
             "leverage": signal.leverage,
         })
-        self.logger.log_entry(signal, order, quantity)
+        # Log trade entry using the correct method name
+        try:
+            self.logger.log_trade(
+                symbol=signal.symbol,
+                side=side,
+                entry_price=entry_price,
+                exit_price=None,
+                pnl=None,
+                duration=None,
+                reason=signal.reason
+            )
+        except Exception as log_err:
+            print(f"[ExecutionGuard] Logging error (non-fatal): {log_err}", flush=True)
 
         return True, "SUCCESS", order
