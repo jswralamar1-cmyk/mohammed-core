@@ -9,5 +9,7 @@ COPY . .
 
 # Set the PYTHONPATH environment variable
 ENV PYTHONPATH=/app
+# Force unbuffered output so logs appear immediately
+ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "core.worker.runner"]
+CMD ["python", "-u", "-m", "core.worker.runner"]

@@ -1,8 +1,13 @@
 import os
+import sys
 import time
 import json
 from datetime import datetime
 from pathlib import Path
+
+# Force unbuffered output so logs appear in Render immediately
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 from core.brain.memory import Memory
 from core.tools.risk_governor import RiskGovernor
