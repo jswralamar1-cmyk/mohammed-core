@@ -9,6 +9,13 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+import requests as _req
+try:
+    _my_ip = _req.get('https://api.ipify.org', timeout=5).text.strip()
+    print(f'[OUTBOUND IP] {_my_ip}', flush=True)
+except Exception as _e:
+    print(f'[OUTBOUND IP] Could not detect: {_e}', flush=True)
+
 from core.brain.memory import Memory
 from core.tools.risk_governor import RiskGovernor
 from core.tools.market_scan import MarketScanner
