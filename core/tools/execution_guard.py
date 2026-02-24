@@ -35,13 +35,19 @@ class ExecutionGuard:
             print(f"--------------------")
             return True, "DRY_RUN_SUCCESS", {"symbol": signal.symbol, "dry_run": True}
         side = "BUY" if signal.direction == "LONG" else "SELL"
-        # 1. Set leverage and margin type
+        # 1. Set leverage
         self.client._post("/fapi/v1/leverage", {"symbol": signal.symbol, "leverage": signal.leverage}, signed=True)
-        self.client._post("/fapi/v1/marginType", {"symbol": signal.symbol, "marginType": "ISOLATED"}, signed=True)
-        # 2. Calculate quantity
-        entry_price = float(self.client._get("/fapi/v1/ticker/price", {"symbol": signal.symbol})['price'])
-        sl_price, _ = self.sltp.calculate_levels(signal.symbol, entry_price, side, signal.brain_dump["final_score"])
-        sl_pct = abs(entry_price - sl_price) / entry_price
+        # Set margin type — ignore error if already set
+        try:
+            self.client._post("/fapi/v1/marginType", {"symbol": signal.symbol, "marginType": "ISOLATED"}, signed=True)
+        except Exception:
+            pass
+        # 2. Get current price and calculate quantity
+        ticker = self.client._get("/fapi/v1/ticker/price", {"symbol": signal.symbol})
+        if not ticker:
+            return False, "PRICE_FETCH_FAILED", None
+        entry_price = float(ticker['price'])
+        sl_pct = abs(entry_price - signal.sl_price) / entry_price if signal.sl_price > 0 else 0.012
         quantity = self.sizer.calculate_quantity(signal.symbol, entry_price, sl_pct, signal.risk_override)
         if quantity == 0:
             return False, "ZERO_QUANTITY", None
@@ -61,6 +67,4 @@ class ExecutionGuard:
         # 4. Record and Log
         self.memory.add_open_position(signal.symbol, order)
         self.logger.log_entry(signal, order, quantity)
-        # 5. Place protection
-        self.sltp.place_protection_orders(signal.symbol, side, quantity, entry_price, signal.brain_dump["final_score"])
         return True, "SUCCESS", order
