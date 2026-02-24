@@ -6,6 +6,9 @@ from core.tools.binance_futures import BinanceFutures
 from core.tools.trade_logger import TradeLogger
 from core.brain.memory import Memory
 
+# Minimum available balance required to open a new position (USDT)
+MIN_AVAILABLE_BALANCE = 10.0
+
 
 @dataclass
 class TradeSignal:
@@ -32,20 +35,20 @@ class ExecutionGuard:
         )
         self.logger = TradeLogger()
 
-    def _get_balance(self) -> float:
+    def _get_account_balances(self) -> tuple:
         """
-        Fetch wallet balance and compute per-trade allocation.
-        Divides wallet balance by max_open_positions so multiple
-        positions can coexist without running out of margin.
+        Returns (avail_balance, wallet_balance) from Binance Futures account.
+        avail_balance = free margin available for new positions.
+        wallet_balance = total equity (including unrealized PnL).
         """
         try:
             account = self.client._get("/fapi/v2/account", signed=True)
             if not account:
                 print("[ExecutionGuard] Account fetch returned None", flush=True)
-                return 20.0
+                return 0.0, 0.0
 
-            wallet_balance = 0.0
             avail_balance = 0.0
+            wallet_balance = 0.0
 
             # Try assets list first
             for asset in account.get('assets', []):
@@ -59,50 +62,37 @@ class ExecutionGuard:
                 wallet_balance = float(account.get('totalWalletBalance', 0))
                 avail_balance = float(account.get('availableBalance', 0))
 
-            print(f"[ExecutionGuard] USDT avail={avail_balance} wallet={wallet_balance}", flush=True)
-
-            # Allocate per-trade: wallet / max_positions so multiple trades can coexist
-            max_positions = self.policy.get('max_open_positions', 3)
-            per_trade_balance = wallet_balance / max_positions
-
-            # Never allocate more than what's actually available
-            if avail_balance > 0:
-                per_trade_balance = min(per_trade_balance, avail_balance)
-
-            # Minimum safety floor
-            if per_trade_balance < 5.0:
-                per_trade_balance = 5.0
-
-            print(f"[ExecutionGuard] Per-trade allocation: ${per_trade_balance:.2f} (wallet=${wallet_balance:.2f} / {max_positions} slots)", flush=True)
-            return per_trade_balance
+            print(f"[ExecutionGuard] USDT avail={avail_balance:.4f} wallet={wallet_balance:.4f}", flush=True)
+            return avail_balance, wallet_balance
 
         except Exception as e:
             print(f"[ExecutionGuard] Balance fetch error: {e}", flush=True)
-            return 20.0
+            return 0.0, 0.0
 
-    def _get_quantity(self, symbol: str, entry_price: float, sl_pct: float, risk_override: float = None) -> float:
-        """Calculate order quantity based on risk parameters."""
+    def _get_quantity(self, symbol: str, entry_price: float, sl_pct: float,
+                      avail_balance: float, risk_override: float = None) -> float:
+        """
+        Calculate order quantity using available balance.
+        The notional is capped at avail_balance * leverage * 0.85 (15% safety buffer).
+        """
         try:
-            balance = self._get_balance()
-            print(f"[ExecutionGuard] Balance per trade: ${balance:.2f}", flush=True)
-
             risk_pct = risk_override if risk_override else self.policy.get('risk_per_trade', 0.02)
             leverage = self.policy.get('leverage', 10)
             if sl_pct <= 0:
                 sl_pct = 0.012
 
-            # Max notional = balance * leverage (hard cap)
-            max_notional = balance * leverage
+            # Hard cap: never exceed 85% of available margin * leverage
+            max_notional = avail_balance * leverage * 0.85
 
-            # Risk-based notional
-            risk_amount = balance * risk_pct
-            notional = (risk_amount / sl_pct) * leverage
+            # Risk-based notional: risk_amount / sl_pct gives position size
+            risk_amount = avail_balance * risk_pct
+            notional = (risk_amount / sl_pct)  # no leverage multiplication here — margin-based
 
-            # Cap notional at max_notional to prevent insufficient margin
-            notional = min(notional, max_notional * 0.90)  # 90% to leave buffer
+            # Cap at max notional
+            notional = min(notional, max_notional)
             quantity = notional / entry_price
 
-            # Get lot size precision
+            # Get lot size precision from exchange info
             exchange_info = self.client._get("/fapi/v1/exchangeInfo")
             if exchange_info:
                 for s in exchange_info.get('symbols', []):
@@ -116,7 +106,7 @@ class ExecutionGuard:
                                 break
                         break
 
-            print(f"[ExecutionGuard] Quantity: {quantity} {symbol} (notional: ${notional:.2f})", flush=True)
+            print(f"[ExecutionGuard] Quantity: {quantity} {symbol} (notional: ${notional:.2f}, avail: ${avail_balance:.2f})", flush=True)
             return quantity
         except Exception as e:
             print(f"[ExecutionGuard] Quantity calc error: {e}", flush=True)
@@ -133,21 +123,37 @@ class ExecutionGuard:
 
         side = "BUY" if signal.direction == "LONG" else "SELL"
 
-        # 1. Set leverage
+        # 0. Check available balance FIRST — skip if insufficient
+        avail_balance, wallet_balance = self._get_account_balances()
+        if avail_balance < MIN_AVAILABLE_BALANCE:
+            print(f"[ExecutionGuard] Skipping {signal.symbol}: avail=${avail_balance:.2f} < min=${MIN_AVAILABLE_BALANCE}", flush=True)
+            return False, "INSUFFICIENT_BALANCE", None
+
+        # 1. Set leverage (with fallback to lower leverage if symbol doesn't support 15x)
         lev_result = self.client._post("/fapi/v1/leverage", {
             "symbol": signal.symbol,
             "leverage": signal.leverage
         }, signed=True)
+
+        # Handle leverage not valid for this symbol
+        if lev_result and lev_result.get('code') == -4028:
+            print(f"[ExecutionGuard] Leverage {signal.leverage}x not supported for {signal.symbol}, trying 10x", flush=True)
+            lev_result = self.client._post("/fapi/v1/leverage", {
+                "symbol": signal.symbol,
+                "leverage": 10
+            }, signed=True)
+            if lev_result and lev_result.get('code'):
+                print(f"[ExecutionGuard] Cannot set leverage for {signal.symbol}: {lev_result}", flush=True)
+                return False, "LEVERAGE_FAILED", None
+            signal.leverage = 10
+
         print(f"[ExecutionGuard] Leverage set: {lev_result}", flush=True)
 
-        # 2. Set margin type to CROSS (compatible with Multi-Assets Mode)
-        # Skip if already set (-4046) or Multi-Assets mode active (-4168)
-        margin_result = self.client._post("/fapi/v1/marginType", {
+        # 2. Set margin type to CROSS — ignore -4046 (already set) and -4168 (multi-assets mode)
+        self.client._post("/fapi/v1/marginType", {
             "symbol": signal.symbol,
             "marginType": "CROSSED"
         }, signed=True)
-        if margin_result and margin_result.get('code') not in [None, -4046, -4168]:
-            print(f"[ExecutionGuard] MarginType: {margin_result}", flush=True)
 
         # 3. Get current price
         ticker = self.client._get("/fapi/v1/ticker/price", {"symbol": signal.symbol})
@@ -161,7 +167,7 @@ class ExecutionGuard:
         else:
             sl_pct = 0.012  # default 1.2%
 
-        quantity = self._get_quantity(signal.symbol, entry_price, sl_pct, signal.risk_override)
+        quantity = self._get_quantity(signal.symbol, entry_price, sl_pct, avail_balance, signal.risk_override)
         if quantity <= 0:
             return False, "ZERO_QUANTITY", None
 
@@ -174,12 +180,14 @@ class ExecutionGuard:
         }, signed=True)
 
         if not order or order.get('code'):
-            print(f"[ExecutionGuard] Order failed: {order}", flush=True)
+            err_code = order.get('code') if order else 'None'
+            err_msg = order.get('msg', '') if order else ''
+            print(f"[ExecutionGuard] Order failed [{err_code}]: {err_msg}", flush=True)
             return False, "ORDER_FAILED", order
 
-        print(f"[ExecutionGuard] Order placed: {order.get('orderId')} {side} {quantity} {signal.symbol} @ ~{entry_price}", flush=True)
+        print(f"[ExecutionGuard] ✅ Order placed: #{order.get('orderId')} {side} {quantity} {signal.symbol} @ ~{entry_price:.4f}", flush=True)
 
-        # 6. Record in memory and log
+        # 6. Record in memory
         self.memory.add_open_position(signal.symbol, {
             "orderId": order.get('orderId'),
             "side": side,
@@ -189,7 +197,8 @@ class ExecutionGuard:
             "tp_price": signal.tp_price,
             "leverage": signal.leverage,
         })
-        # Log trade entry using the correct method name
+
+        # 7. Log trade entry
         try:
             self.logger.log_trade(
                 symbol=signal.symbol,
