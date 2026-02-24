@@ -6,6 +6,6 @@ services:
     autoDeploy: true
     envVars:
       - key: BINANCE_API_KEY
-        from: "env"
+        sync: false
       - key: BINANCE_API_SECRET
-        from: "env"
+        sync: false
