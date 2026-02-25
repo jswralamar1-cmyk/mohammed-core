@@ -123,7 +123,29 @@ class ExecutionGuard:
 
         side = "BUY" if signal.direction == "LONG" else "SELL"
 
-        # 0. Check available balance FIRST — skip if insufficient
+        # 0a. تحقق من بينانس مباشرة — لا تفتح صفقة إذا الرمز عنده position مفتوح فعلياً
+        try:
+            positions = self.client._get("/fapi/v2/positionRisk", {"symbol": signal.symbol}, signed=True)
+            if positions:
+                for p in positions:
+                    if p.get('symbol') == signal.symbol and abs(float(p.get('positionAmt', 0))) > 0:
+                        print(f"[ExecutionGuard] SKIP {signal.symbol}: Already has open position on Binance (amt={p.get('positionAmt')})", flush=True)
+                        # تأكد إن الذاكرة تعرف عن هذه الصفقة
+                        if signal.symbol not in self.memory.state.get('open_positions', {}):
+                            self.memory.add_open_position(signal.symbol, {
+                                'side': 'BUY' if float(p.get('positionAmt', 0)) > 0 else 'SELL',
+                                'quantity': abs(float(p.get('positionAmt', 0))),
+                                'entry_price': float(p.get('entryPrice', 0)),
+                                'sl_price': signal.sl_price,
+                                'tp_price': signal.tp_price,
+                                'leverage': signal.leverage,
+                            })
+                            print(f"[ExecutionGuard] Synced {signal.symbol} to memory from Binance.", flush=True)
+                        return False, "DUPLICATE_POSITION", None
+        except Exception as e:
+            print(f"[ExecutionGuard] positionRisk check error (non-fatal): {e}", flush=True)
+
+        # 0b. Check available balance FIRST — skip if insufficient
         avail_balance, wallet_balance = self._get_account_balances()
         if avail_balance < MIN_AVAILABLE_BALANCE:
             print(f"[ExecutionGuard] Skipping {signal.symbol}: avail=${avail_balance:.2f} < min=${MIN_AVAILABLE_BALANCE}", flush=True)

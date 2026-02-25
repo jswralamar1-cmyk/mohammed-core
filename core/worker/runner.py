@@ -21,6 +21,7 @@ from core.tools.risk_governor import RiskGovernor
 from core.tools.market_scan import MarketScanner
 from core.tools.weighted_brain import WeightedBrain
 from core.tools.order_router import OrderRouter
+from core.tools.trade_monitor import TradeMonitor
 
 
 def load_policy():
@@ -45,37 +46,48 @@ def load_policy():
 
 
 def main_loop():
-    print(f"[{datetime.now()}] MohammedCore Worker started.")
+    print(f"[{datetime.now()}] MohammedCore Worker started.", flush=True)
 
     memory = Memory(data_path=Path("storage/state.json"))
     policy = load_policy()
 
-    print(f"[{datetime.now()}] API Key loaded: {'YES' if policy.get('binance_api_key') else 'NO'}")
+    print(f"[{datetime.now()}] API Key loaded: {'YES' if policy.get('binance_api_key') else 'NO'}", flush=True)
+    print(f"[{datetime.now()}] Max positions: {policy.get('max_open_positions', 10)}", flush=True)
 
     scanner = MarketScanner(policy)
     brain = WeightedBrain(policy)
     governor = RiskGovernor(policy, memory)
     router = OrderRouter(policy, memory)
+    monitor = TradeMonitor(memory, policy)   # ← وحدة المتابعة
+
+    from core.tools.momentum_strategy import MomentumStrategy
+    from core.tools.pattern_strategy import PatternStrategy
 
     while True:
         try:
-            print(f"[{datetime.now()}] Scanning market...")
+            # ═══════════════════════════════════════════
+            # الخطوة 1: تابع الصفقات المفتوحة أولاً
+            # ═══════════════════════════════════════════
+            monitor.check_all_positions()
+
+            # ═══════════════════════════════════════════
+            # الخطوة 2: امسح السوق وافتح صفقات جديدة
+            # ═══════════════════════════════════════════
+            print(f"[{datetime.now()}] Scanning market...", flush=True)
             candidates = scanner.scan_for_candidates()
 
             if not candidates:
-                print(f"[{datetime.now()}] No candidates found. Waiting for next cycle.")
+                print(f"[{datetime.now()}] No candidates found. Waiting for next cycle.", flush=True)
                 time.sleep(60)
                 continue
 
+            momentum_strategy = MomentumStrategy()
+            pattern_strategy = PatternStrategy()
+
+            placed = 0
             for candidate in candidates:
                 symbol = candidate['symbol']
-                print(f"[{datetime.now()}] Analyzing candidate: {symbol}")
-
-                from core.tools.momentum_strategy import MomentumStrategy
-                from core.tools.pattern_strategy import PatternStrategy
-
-                momentum_strategy = MomentumStrategy()
-                pattern_strategy = PatternStrategy()
+                print(f"[{datetime.now()}] Analyzing candidate: {symbol}", flush=True)
 
                 scores = [
                     momentum_strategy.analyze(candidate['candles']),
@@ -86,22 +98,24 @@ def main_loop():
                 signal = governor.validate_trade(symbol, brain_dump, candidate)
 
                 if not signal.approved:
-                    print(f"[{datetime.now()}] Trade REJECTED for {symbol}: {signal.reason}")
+                    print(f"[{datetime.now()}] Trade REJECTED for {symbol}: {signal.reason}", flush=True)
                     continue
 
-                print(f"[{datetime.now()}] Trade APPROVED for {symbol}. Routing order...")
+                print(f"[{datetime.now()}] Trade APPROVED for {symbol}. Routing order...", flush=True)
                 result = router.route(signal)
 
                 if result['success']:
-                    print(f"[{datetime.now()}] Order PLACED for {symbol}: {result['status']}")
+                    placed += 1
+                    print(f"[{datetime.now()}] ✅ Order PLACED for {symbol}: {result['status']}", flush=True)
                 else:
-                    print(f"[{datetime.now()}] Order FAILED for {symbol}: {result['status']}")
+                    print(f"[{datetime.now()}] ❌ Order FAILED for {symbol}: {result['status']}", flush=True)
 
-            print(f"[{datetime.now()}] Scan cycle complete. Waiting...")
+            open_count = len(memory.state.get('open_positions', {}))
+            print(f"[{datetime.now()}] Scan complete. Placed: {placed} | Open positions: {open_count}", flush=True)
             time.sleep(policy.get('scanner', {}).get('scan_interval_seconds', 300))
 
         except Exception as e:
-            print(f"[{datetime.now()}] ERROR in main loop: {type(e).__name__}: {e}")
+            print(f"[{datetime.now()}] ERROR in main loop: {type(e).__name__}: {e}", flush=True)
             time.sleep(30)
 
 
