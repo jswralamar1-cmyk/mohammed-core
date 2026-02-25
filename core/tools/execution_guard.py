@@ -7,7 +7,7 @@ from core.tools.trade_logger import TradeLogger
 from core.brain.memory import Memory
 
 # Minimum available balance required to open a new position (USDT)
-MIN_AVAILABLE_BALANCE = 10.0
+MIN_AVAILABLE_BALANCE = 5.0
 
 
 @dataclass
